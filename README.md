@@ -37,6 +37,11 @@ uv run idrd search --category ATLETISMO --page 2
 uv run idrd search --program-id 12,27 --locality 5
 uv run idrd search --json
 
+# Search results are cached on disk (see "Response cache" below)
+uv run idrd search --no-cache   # bypass the cache for one run
+uv run idrd cache stats         # show cache location / entry count
+uv run idrd cache clear         # drop all cached responses
+
 # Activity details
 uv run idrd activities show 11409
 uv run idrd activities show 11409 --json
@@ -71,6 +76,29 @@ uv run idrd logout
 - Default: Rich tables (human-readable)
 - `--json`: Raw JSON (machine-parseable)
 
+## Response cache
+
+The IDRD API is rate-limited (`X-Ratelimit-Limit: 300`), so read/search
+commands cache successful responses on disk:
+
+- Cached: `search`, `activities show`, `programs list`, `categories list`,
+  `stages list`
+- Never cached: auth/write calls (`login`, `enroll`, `my-bookings`,
+  `whoami`) and `search --hidden` probing
+
+Entries live in `~/.idrd/cache/` (override with `IDRD_CACHE_DIR`), keyed by
+a hash of the exact query, with a TTL of `IDRD_CACHE_TTL` seconds (default
+300). Writes are atomic (temp file + rename), so concurrent CLI runs never
+see a half-written entry. When output comes from the cache, the CLI prints a
+dim `⚡ served from cache` line (table output only — `--json` stays pure).
+
+```bash
+uv run idrd cache stats    # cache dir, entry count, oldest entry, default TTL
+uv run idrd cache clear    # delete everything; next run refetches from the API
+uv run idrd search --no-cache
+uv run idrd activities show 11409 --no-cache
+```
+
 ## Auth note
 
 The API uses Bearer token auth. After `idrd login` succeeds, the token is
@@ -87,6 +115,7 @@ reject unauthenticated requests with a clear message.
 src/idrd/
 ├── cli.py       — Typer CLI commands (thin handlers)
 ├── client.py    — IdrdClient (httpx.AsyncClient, async)
+├── cache.py     — CachedClient decorator + TTL cache backends (FileCache, MemoryCache)
 ├── models.py    — Pydantic models (Schedule, Program, Category, etc.)
 ├── ports.py     — IdrdClientPort (Protocol for testability)
 ├── service.py   — Service layer (business logic)
@@ -94,8 +123,9 @@ src/idrd/
 
 tests/
 ├── conftest.py  — pytest config (--run-network flag)
-├── test_unit.py — 17 unit tests (mocked transport, no network)
-└── test_live.py — 6 live tests (require --run-network)
+├── test_unit.py — request-shape tests (mocked transport, no network)
+├── test_cache.py — caching layer tests (no network)
+└── test_live.py — live tests (require --run-network)
 ```
 
 ### Design decisions
@@ -108,6 +138,11 @@ tests/
   `IdrdClient(token=None)` skips disk (for tests and explicit control).
 - **Dependency injection**: Service layer takes the port interface, not
   the concrete client.
+- **Search caching layer**: `CachedClient` wraps `IdrdClient` and caches
+  successful read/search responses (schedules, activity detail, reference
+  lists) in a TTL JSON cache under `~/.idrd/cache/`. The `Cache` Protocol
+  lets tests inject an in-memory backend; failed calls are never cached,
+  and auth/write calls always pass through.
 
 ## Tests
 

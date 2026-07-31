@@ -37,6 +37,12 @@ class IdrdClientPort(Protocol):
         """Get a single schedule by id."""
         ...
 
+    async def discover_hidden(
+        self, max_probe: int = 5, delay: float = 0.05
+    ) -> tuple[list[int], list[int]]:
+        """Probe for schedules beyond the public list. Returns (found, probed)."""
+        ...
+
     async def list_programs(self) -> list[Program]:
         """List all programs."""
         ...
