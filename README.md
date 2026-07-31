@@ -1,6 +1,7 @@
 # IDRD CLI — Portal Ciudadano
 
-CLI for the IDRD (Bogotá Recreation & Sports Institute) Portal Ciudadano API.
+CLI + MCP server for the IDRD (Bogotá Recreation & Sports Institute) Portal
+Ciudadano API.
 
 ## Setup
 
@@ -81,6 +82,57 @@ Since no real IDRD credentials are available for CI testing, write commands
 are verified to hit the correct endpoint shape (URL + method) and correctly
 reject unauthenticated requests with a clear message.
 
+## MCP server (idrd-mcp)
+
+An MCP (Model Context Protocol) server exposes the IDRD API plus a **local
+bookmark tool** to LLM agents (Claude Code, Cursor, Hermes, etc.).
+
+```bash
+# Run over stdio (default MCP transport)
+uv run idrd-mcp
+
+# Inspect/validate with the FastMCP CLI
+uv run fastmcp inspect src/idrd/mcp_server.py:mcp
+uv run fastmcp list src/idrd/mcp_server.py --json
+```
+
+### Tools
+
+| Tool                | Description                                              |
+|---------------------|----------------------------------------------------------|
+| `search_activities` | Search public schedules (category / program / locality)  |
+| `get_activity`      | Full details for one schedule by ID                      |
+| `bookmark_activity` | Save a schedule locally, with an optional note           |
+| `list_bookmarks`    | List locally bookmarked activities                       |
+| `remove_bookmark`   | Remove a bookmark by schedule ID                         |
+| `is_bookmarked`     | Check whether a schedule is bookmarked                   |
+
+Bookmarks are stored in `~/.idrd/bookmarks.json` (the IDRD API has no
+bookmark endpoint). Override the location with the `IDRD_BOOKMARKS_PATH`
+environment variable — useful for tests or per-machine stores:
+
+```bash
+IDRD_BOOKMARKS_PATH=./bookmarks.json uv run idrd-mcp
+```
+
+### Registering with an MCP client
+
+```bash
+# Claude Code
+uv run fastmcp install claude-code src/idrd/mcp_server.py
+
+# Cursor (editable install so local code changes apply)
+uv run fastmcp install cursor src/idrd/mcp_server.py -e .
+
+# Any other client: point it at `uv run idrd-mcp` (stdio)
+```
+
+End-to-end smoke check against the live API (needs network):
+
+```bash
+uv run python tests/e2e_stdio_check.py
+```
+
 ## Architecture
 
 ```
@@ -90,12 +142,17 @@ src/idrd/
 ├── models.py    — Pydantic models (Schedule, Program, Category, etc.)
 ├── ports.py     — IdrdClientPort (Protocol for testability)
 ├── service.py   — Service layer (business logic)
-└── session.py   — Token persistence (~/.idrd/session.json)
+├── session.py   — Token persistence (~/.idrd/session.json)
+├── bookmarks.py — Local bookmark store (~/.idrd/bookmarks.json)
+└── mcp_server.py — FastMCP server: activities + bookmark tools
 
 tests/
 ├── conftest.py  — pytest config (--run-network flag)
-├── test_unit.py — 17 unit tests (mocked transport, no network)
-└── test_live.py — 6 live tests (require --run-network)
+├── test_unit.py — unit tests for the client (mocked transport, no network)
+├── test_bookmarks.py — bookmark store unit tests
+├── test_mcp_server.py — MCP tool tests (fake service, no network)
+├── e2e_stdio_check.py — manual E2E check: real stdio client + live API
+└── test_live.py — live tests (require --run-network)
 ```
 
 ### Design decisions
