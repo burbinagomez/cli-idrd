@@ -17,6 +17,14 @@ class IdrdService:
     def __init__(self, client: IdrdClientPort) -> None:
         self._client = client
 
+    @property
+    def cache_stats(self) -> Optional[tuple[int, int]]:
+        """(hits, misses) when the client has a caching layer, else None."""
+        client = self._client
+        if hasattr(client, "hits") and hasattr(client, "misses"):
+            return client.hits, client.misses
+        return None
+
     # ── Auth ──────────────────────────────────────────────────────────────
 
     async def login(self, email: str, password: str) -> AuthToken:

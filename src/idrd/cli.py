@@ -14,7 +14,9 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from idrd.cache import CachedClient, FileCache
 from idrd.client import IdrdClient
+from idrd.ports import IdrdClientPort
 from idrd.service import IdrdService
 from idrd.session import clear_token
 
@@ -31,6 +33,8 @@ categories_app = typer.Typer(help="Category commands.")
 app.add_typer(categories_app, name="categories")
 stages_app = typer.Typer(help="Stage commands.")
 app.add_typer(stages_app, name="stages")
+cache_app = typer.Typer(help="Local response cache commands (search results).")
+app.add_typer(cache_app, name="cache")
 
 console = Console()
 
@@ -71,9 +75,22 @@ def resolve_password(explicit: Optional[str]) -> str:
         ) from None
 
 
-def _get_service() -> IdrdService:
-    """Build service using stored token or fresh client (auto-loads from disk)."""
-    return IdrdService(IdrdClient())
+def _get_service(cache: bool = True) -> IdrdService:
+    """Build service using stored token or fresh client (auto-loads from disk).
+
+    Read/search calls go through a TTL disk cache unless cache=False.
+    """
+    client: IdrdClientPort = IdrdClient()
+    if cache:
+        client = CachedClient(client)
+    return IdrdService(client)
+
+
+def _print_cache_note(service: IdrdService) -> None:
+    """Print a dim 'served from cache' hint when the last read was a cache hit."""
+    stats = service.cache_stats
+    if stats and stats[0]:
+        console.print("  [dim]⚡ served from cache[/]")
 
 
 def _print_json(data) -> None:
@@ -181,10 +198,11 @@ def search(
     locality: Optional[int] = typer.Option(None, "--locality", "-l", help="Locality ID"),
     page: int = typer.Option(1, "--page", help="Page number"),
     hidden: bool = typer.Option(False, "--hidden", help="Discover activities past the public list (probes singular public-schedules/{id})"),
+    no_cache: bool = typer.Option(False, "--no-cache", help="Bypass the response cache and hit the API"),
     json: bool = typer.Option(False, "--json", help="Output as JSON"),
 ) -> None:
     """Search public activity schedules (or discover hidden ones with --hidden)."""
-    service = _get_service()
+    service = _get_service(cache=not no_cache)
     pids: Optional[list[int]] = None
     if program_id:
         pids = [int(x.strip()) for x in program_id.split(",") if x.strip()]
@@ -238,6 +256,7 @@ def search(
             title=f"Activities (page {meta.get('current_page', '?')}/{meta.get('last_page', '?')})",
         ))
         console.print(f"  [dim]Total: {meta.get('total', '?')} items | Page {meta.get('current_page', '?')} of {meta.get('last_page', '?')}[/]")
+        _print_cache_note(service)
 
 
 # ── Activities ────────────────────────────────────────────────────────────
@@ -245,10 +264,11 @@ def search(
 @activities_app.command(name="show")
 def activities_show(
     schedule_id: int = typer.Argument(..., help="Schedule/activity ID"),
+    no_cache: bool = typer.Option(False, "--no-cache", help="Bypass the response cache and hit the API"),
     json: bool = typer.Option(False, "--json", help="Output as JSON"),
 ) -> None:
     """Show details of a single activity schedule."""
-    service = _get_service()
+    service = _get_service(cache=not no_cache)
     try:
         sched = _run(service.get_schedule(schedule_id))
     except Exception as e:
@@ -266,6 +286,7 @@ def activities_show(
         for field, val in sched.model_dump(mode="json").items():
             table.add_row(field.replace("_", " ").title(), str(val) if val is not None else "[dim]null[/]")
         console.print(table)
+        _print_cache_note(service)
 
 
 # ── Programs ──────────────────────────────────────────────────────────────
@@ -413,6 +434,31 @@ def my_bookings(
                 b.created_at or "",
             )
         console.print(table)
+
+
+# ── Cache ─────────────────────────────────────────────────────────────────
+
+@cache_app.command(name="clear")
+def cache_clear() -> None:
+    """Delete all cached responses (search results, activity details)."""
+    cache = FileCache()
+    removed = _run(cache.clear())
+    console.print(
+        f"[green]✓[/] Cache cleared ({removed} entr{'y' if removed == 1 else 'ies'} removed)."
+    )
+
+
+@cache_app.command(name="stats")
+def cache_stats() -> None:
+    """Show cache location, entry count, and default TTL."""
+    cache = FileCache()
+    info = cache.stats()
+    console.print(f"Cache dir:  [cyan]{info['dir']}[/]")
+    console.print(f"Entries:    [cyan]{info['entries']}[/]")
+    if info["entries"]:
+        console.print(f"Oldest:     [cyan]{info['oldest_seconds']:.0f}s[/] old")
+    ttl = info["ttl_default"]
+    console.print(f"Default TTL: [cyan]{ttl if ttl is not None else 'never'}s[/]")
 
 
 # ── Main entry point ──────────────────────────────────────────────────────
