@@ -5,17 +5,21 @@ Uses httpx.MockTransport to verify exact URLs, methods, headers, and query param
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Optional
 from unittest.mock import patch
 
 import httpx
 import pytest
 from pydantic import TypeAdapter
+from typer.testing import CliRunner
 
 from idrd.client import IdrdClient
+from idrd.cli import app, resolve_password
 from idrd.models import AuthToken, Booking, Category, Program, Schedule, Stage, User
 from idrd.ports import IdrdClientPort
-from idrd.session import load_token, save_token
+from idrd.session import clear_token, load_token, save_token
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────
@@ -84,7 +88,7 @@ async def test_login_422() -> None:
     client = IdrdClient(token=None)
     client._client = _mock_transport(handler)
     with pytest.raises(RuntimeError, match="Por favor completa"):
-        await client.login("", "")
+        await client.login("test@test.com", "x")
 
 
 # ── Test: search_schedules request shape ──────────────────────────────────
@@ -298,3 +302,255 @@ def test_client_satisfies_port() -> None:
     token = AuthToken(access_token="x", token_type="Bearer")
     client: IdrdClientPort = cast(IdrdClientPort, IdrdClient(token=token))
     assert isinstance(client, IdrdClientPort)
+
+
+# ── Test: login hardening ─────────────────────────────────────────────────
+
+@pytest.fixture(autouse=True)
+def _isolate_session(tmp_path, monkeypatch):
+    """Never touch the real ~/.idrd/session.json during tests.
+
+    Prevents tests from clobbering a real stored token; login() persists via
+    save_token() and would otherwise write to the user's actual session file.
+    """
+    session_file = tmp_path / "session.json"
+    monkeypatch.setenv("IDRD_SESSION_PATH", str(session_file))
+    return session_file
+
+
+@pytest.mark.asyncio
+async def test_login_persists_token(_isolate_session) -> None:
+    """Successful login updates the client token and writes the session file."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"access_token": "abc123", "token_type": "Bearer"})
+
+    client = IdrdClient(token=None)
+    client._client = _mock_transport(handler)
+    tok = await client.login("test@test.com", "secret123")
+    assert tok.access_token == "abc123"
+    assert client._token is tok
+    loaded = load_token()
+    assert loaded is not None and loaded.access_token == "abc123"
+
+
+@pytest.mark.asyncio
+async def test_login_401_missing_code() -> None:
+    """401 without the `code` field must not crash pydantic — friendly message instead."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, json={"message": "credenciales inválidas"})
+
+    client = IdrdClient(token=None)
+    client._client = _mock_transport(handler)
+    with pytest.raises(RuntimeError, match="credenciales inválidas"):
+        await client.login("test@test.com", "wrong")
+
+
+@pytest.mark.asyncio
+async def test_login_401_bare_error_key() -> None:
+    """401 with an `error` key (non-Laravel shape) still surfaces the message."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, json={"error": "invalid_grant"})
+
+    client = IdrdClient(token=None)
+    client._client = _mock_transport(handler)
+    with pytest.raises(RuntimeError, match="invalid_grant"):
+        await client.login("test@test.com", "wrong")
+
+
+@pytest.mark.asyncio
+async def test_login_422_errors_dict() -> None:
+    """422 with nested errors dict is flattened into a readable message."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(422, json={
+            "errors": {"email": ["El campo email es obligatorio."]},
+        })
+
+    client = IdrdClient(token=None)
+    client._client = _mock_transport(handler)
+    with pytest.raises(RuntimeError, match="email: El campo email es obligatorio."):
+        await client.login("test@test.com", "x")
+
+
+@pytest.mark.asyncio
+async def test_login_500() -> None:
+    """Server errors become RuntimeError with the status code, not HTTPStatusError."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, json={"message": "internal error"})
+
+    client = IdrdClient(token=None)
+    client._client = _mock_transport(handler)
+    with pytest.raises(RuntimeError, match="HTTP 500"):
+        await client.login("test@test.com", "pw")
+
+
+@pytest.mark.asyncio
+async def test_login_429() -> None:
+    """Rate limiting is called out explicitly."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(429, json={})
+
+    client = IdrdClient(token=None)
+    client._client = _mock_transport(handler)
+    with pytest.raises(RuntimeError, match="Rate limited"):
+        await client.login("test@test.com", "pw")
+
+
+@pytest.mark.asyncio
+async def test_login_network_error() -> None:
+    """Transport errors surface as a friendly RuntimeError, not a traceback."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused", request=request)
+
+    client = IdrdClient(token=None)
+    client._client = _mock_transport(handler)
+    with pytest.raises(RuntimeError, match="network error"):
+        await client.login("test@test.com", "pw")
+
+
+@pytest.mark.asyncio
+async def test_login_empty_inputs() -> None:
+    """Empty email/password are rejected client-side without any network call."""
+    client = IdrdClient(token=None)
+    with pytest.raises(RuntimeError, match="Email is required"):
+        await client.login("  ", "pw")
+    with pytest.raises(RuntimeError, match="Password is required"):
+        await client.login("test@test.com", "")
+
+
+# ── Test: token expiry (hardening) ────────────────────────────────────────
+
+def test_auth_token_derives_expiry() -> None:
+    tok = AuthToken(access_token="x", expires_in=3600)
+    assert tok.expires_at is not None
+    assert not tok.is_expired()
+
+
+def test_auth_token_expired() -> None:
+    tok = AuthToken(
+        access_token="x",
+        expires_at=datetime.now(timezone.utc) - timedelta(seconds=10),
+    )
+    assert tok.is_expired()
+
+
+def test_auth_token_no_expiry_never_expired() -> None:
+    tok = AuthToken(access_token="x")
+    assert tok.expires_at is None
+    assert not tok.is_expired()
+
+
+@pytest.mark.asyncio
+async def test_whoami_expired_token() -> None:
+    """Authed calls fail fast with an expiry message instead of hitting the API."""
+    expired = AuthToken(
+        access_token="x",
+        expires_at=datetime.now(timezone.utc) - timedelta(seconds=5),
+    )
+    client = IdrdClient(token=expired)
+    with pytest.raises(RuntimeError, match="expired"):
+        await client.whoami()
+
+
+# ── Test: session persistence (hardening) ─────────────────────────────────
+
+def test_session_roundtrip(_isolate_session) -> None:
+    tok = AuthToken(access_token="tok", token_type="Bearer", expires_in=3600)
+    save_token(tok)
+    loaded = load_token()
+    assert loaded is not None
+    assert loaded.access_token == "tok"
+    assert loaded.expires_at is not None
+    clear_token()
+    assert load_token() is None
+
+
+def test_load_token_missing(_isolate_session) -> None:
+    assert load_token() is None
+
+
+def test_load_token_corrupt(_isolate_session) -> None:
+    Path(_isolate_session).write_text("{not json", encoding="utf-8")
+    assert load_token() is None
+
+
+def test_load_token_invalid_shape(_isolate_session) -> None:
+    Path(_isolate_session).write_text('{"foo": 1}', encoding="utf-8")
+    assert load_token() is None
+
+
+# ── Test: CLI login command (hardening) ───────────────────────────────────
+
+class _FakeService:
+    def __init__(self, error: Optional[str] = None) -> None:
+        self.error = error
+        self.calls: list[tuple[str, str]] = []
+
+    async def login(self, email: str, password: str) -> AuthToken:
+        self.calls.append((email, password))
+        if self.error:
+            raise RuntimeError(self.error)
+        return AuthToken(access_token="cli-token", token_type="Bearer")
+
+
+def test_cli_login_explicit_password(monkeypatch) -> None:
+    fake = _FakeService()
+    monkeypatch.setattr("idrd.cli._get_service", lambda: fake)
+    result = CliRunner().invoke(app, ["login", "--email", "a@b.c", "--password", "secret"])
+    assert result.exit_code == 0, result.output
+    assert fake.calls == [("a@b.c", "secret")]
+
+
+def test_cli_login_env_password(monkeypatch) -> None:
+    fake = _FakeService()
+    monkeypatch.setattr("idrd.cli._get_service", lambda: fake)
+    monkeypatch.setenv("IDRD_PASSWORD", "envpass")
+    result = CliRunner().invoke(app, ["login", "--email", "a@b.c"])
+    assert result.exit_code == 0, result.output
+    assert fake.calls == [("a@b.c", "envpass")]
+
+
+def test_cli_login_error_exits_nonzero(monkeypatch) -> None:
+    fake = _FakeService(error="Usuario o contraseña incorrectos")
+    monkeypatch.setattr("idrd.cli._get_service", lambda: fake)
+    result = CliRunner().invoke(app, ["login", "--email", "a@b.c", "--password", "x"])
+    assert result.exit_code == 1
+    assert "Login failed" in result.output
+    assert "Usuario o contraseña incorrectos" in result.output
+
+
+def test_resolve_password_explicit_and_env(monkeypatch) -> None:
+    monkeypatch.setenv("IDRD_PASSWORD", "envpass")
+    assert resolve_password("explicit") == "explicit"
+    assert resolve_password(None) == "envpass"
+
+
+def test_resolve_password_missing_raises(monkeypatch) -> None:
+    monkeypatch.delenv("IDRD_PASSWORD", raising=False)
+    import getpass
+    import sys
+
+    class _TtyStdin:
+        def isatty(self) -> bool:
+            return True
+
+    monkeypatch.setattr(sys, "stdin", _TtyStdin())
+
+    def _no_tty(prompt: str = "Password: ") -> str:
+        raise EOFError()
+
+    monkeypatch.setattr(getpass, "getpass", _no_tty)
+    with pytest.raises(RuntimeError, match="No password provided"):
+        resolve_password(None)
+
+
+def test_resolve_password_non_interactive_raises(monkeypatch) -> None:
+    monkeypatch.delenv("IDRD_PASSWORD", raising=False)
+    import sys
+
+    class _PipeStdin:
+        def isatty(self) -> bool:
+            return False
+
+    monkeypatch.setattr(sys, "stdin", _PipeStdin())
+    with pytest.raises(RuntimeError, match="No password provided"):
+        resolve_password(None)

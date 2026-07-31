@@ -2,24 +2,50 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 # ── Auth ──────────────────────────────────────────────────────────────────
 
 class AuthToken(BaseModel):
-    """Token response from POST /api/login."""
+    """Token response from POST /api/login.
+
+    The server only returns ``access_token`` + ``token_type`` today, but
+    ``expires_in`` / ``expires_at`` are accepted if the API starts sending
+    them (or callers construct them). ``is_expired()`` lets the client fail
+    fast instead of discovering a dead token via a 401 mid-command.
+    """
     access_token: str
     token_type: str = "Bearer"
+    expires_in: Optional[int] = None
+    expires_at: Optional[datetime] = None
+
+    @model_validator(mode="after")
+    def _derive_expiry(self) -> AuthToken:
+        if self.expires_at is None and self.expires_in is not None:
+            self.expires_at = datetime.now(timezone.utc) + timedelta(seconds=self.expires_in)
+        return self
+
+    def is_expired(self, now: Optional[datetime] = None, skew_seconds: int = 30) -> bool:
+        """True if the token has an expiry and it has passed (with clock skew)."""
+        if self.expires_at is None:
+            return False
+        now = now or datetime.now(timezone.utc)
+        exp = self.expires_at
+        if exp.tzinfo is None:
+            exp = exp.replace(tzinfo=timezone.utc)
+        return now >= exp - timedelta(seconds=skew_seconds)
 
 
 class LoginError(BaseModel):
-    """Error response from login."""
-    message: str
-    code: int
+    """Error response from login. Fields optional — the API shape is not
+    guaranteed to include both, and we never want a parse error to mask
+    the real auth failure."""
+    message: Optional[str] = None
+    code: Optional[int] = None
 
 
 class ValidationError(BaseModel):
