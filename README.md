@@ -74,8 +74,18 @@ uv run idrd logout
 ## Auth note
 
 The API uses Bearer token auth. After `idrd login` succeeds, the token is
-persisted to `~/.idrd/session.json`. Writes (enroll, my-bookings, whoami)
-require a valid token. The token auto-loads from disk on any command.
+stored in the OS credential store via `keyring`:
+
+- Windows: Credential Manager (DPAPI-backed; `WinVaultKeyring`)
+- macOS: Keychain
+- Linux: Secret Service (dbus)
+
+`~/.idrd/session.json` is used **only as a fallback** when no keyring backend
+is available (e.g. headless Linux/CI without Secret Service). The fallback
+file is created with restrictive permissions (0o600 on POSIX, current-user-only
+ACL on Windows) and written atomically, and a warning is logged whenever it is
+used. Writes (enroll, my-bookings, whoami) require a valid token. The token
+auto-loads on any command.
 
 Since no real IDRD credentials are available for CI testing, write commands
 are verified to hit the correct endpoint shape (URL + method) and correctly

@@ -81,9 +81,16 @@ def _schedule_table(schedules, title: str = "Activities") -> Table:
 @app.command()
 def login(
     email: str = typer.Option(..., "--email", "-e", help="Email address"),
-    password: str = typer.Option(..., "--password", "-p", help="Password", hide_input=True),
+    password: Optional[str] = typer.Option(
+        None, "--password", "-p", help="Password (prompted securely if omitted)", hide_input=True
+    ),
 ) -> None:
     """Authenticate and store the session token."""
+    import getpass
+
+    if password is None:
+        # Avoid the password ever appearing in shell history / process lists.
+        password = getpass.getpass("Password: ")
     service = _get_service()
     try:
         token = _run(service.login(email=email, password=password))
