@@ -53,6 +53,10 @@ uv run idrd stages list
 # Login stores token in ~/.idrd/session.json
 uv run idrd login --email your@email.com --password yourpass
 
+# Safer: omit --password — the CLI uses $IDRD_PASSWORD, else prompts hidden
+uv run idrd login --email your@email.com
+IDRD_PASSWORD=yourpass uv run idrd login --email your@email.com
+
 # View your user info
 uv run idrd whoami
 
@@ -65,6 +69,20 @@ uv run idrd my-bookings
 # Clear stored token
 uv run idrd logout
 ```
+
+Password resolution order: `--password` flag > `$IDRD_PASSWORD` > hidden interactive
+prompt. Prefer the env var or prompt so the password never appears in shell
+history or process listings. If no password is available and stdin is not a
+terminal, login fails with a clear message (exit code 1).
+
+Session file location defaults to `~/.idrd/session.json`; override with
+`IDRD_SESSION_PATH` (useful for tests and CI). Writes are atomic (temp file +
+rename) and the file is chmod 600 on POSIX.
+
+If the server returns `expires_in`/`expires_at` in the login response, the token
+records its expiry and auth-gated commands fail fast with a clear
+"token has expired — re-run idrd login" message instead of hitting the API with
+a dead token.
 
 ### Output formats
 
@@ -90,11 +108,11 @@ src/idrd/
 ├── models.py    — Pydantic models (Schedule, Program, Category, etc.)
 ├── ports.py     — IdrdClientPort (Protocol for testability)
 ├── service.py   — Service layer (business logic)
-└── session.py   — Token persistence (~/.idrd/session.json)
+└── session.py   — Token persistence (~/.idrd/session.json, atomic writes)
 
 tests/
 ├── conftest.py  — pytest config (--run-network flag)
-├── test_unit.py — 17 unit tests (mocked transport, no network)
+├── test_unit.py — 38 unit tests (mocked transport, no network)
 └── test_live.py — 6 live tests (require --run-network)
 ```
 

@@ -11,7 +11,6 @@ from idrd.models import (
     AuthToken,
     Booking,
     Category,
-    LoginError,
     Program,
     Schedule,
     SingleResponse,
@@ -22,6 +21,36 @@ from idrd.ports import IdrdClientPort
 from idrd.session import load_token, save_token
 
 _UNSET = object()
+
+
+def _error_message(resp: httpx.Response, default: str = "Authentication failed.") -> str:
+    """Extract a human-readable message from an error response body.
+
+    The API is Laravel and returns several shapes (``message`` + ``code``,
+    ``message`` + ``errors`` dict, bare ``error``). Parse defensively so a
+    shape change never surfaces as a pydantic traceback to the user.
+    """
+    try:
+        body = resp.json()
+    except ValueError:
+        return default
+    if not isinstance(body, dict):
+        return default
+    for key in ("message", "error", "detail"):
+        val = body.get(key)
+        if isinstance(val, str) and val.strip():
+            return val
+    errors = body.get("errors")
+    if isinstance(errors, dict) and errors:
+        parts = []
+        for field, errs in errors.items():
+            if isinstance(errs, list):
+                parts.append(f"{field}: {', '.join(str(e) for e in errs)}")
+            else:
+                parts.append(f"{field}: {errs}")
+        if parts:
+            return "; ".join(parts)
+    return default
 
 
 class IdrdClient(IdrdClientPort):
@@ -80,10 +109,14 @@ class IdrdClient(IdrdClientPort):
         return await self._client.delete(path, headers=headers, **kwargs)
 
     async def _check_auth(self) -> None:
-        """Raise if no token is loaded."""
+        """Raise if no token is loaded, or the stored token has expired."""
         if not self._token:
             raise RuntimeError(
                 "Not authenticated. Run 'idrd login' first or provide a token."
+            )
+        if self._token.is_expired():
+            raise RuntimeError(
+                "Stored token has expired. Re-run 'idrd login' to get a fresh token."
             )
 
     @staticmethod
@@ -93,18 +126,46 @@ class IdrdClient(IdrdClientPort):
     # ── public API ────────────────────────────────────────────────────────
 
     async def login(self, email: str, password: str) -> AuthToken:
-        """Authenticate, store the token, return it."""
-        resp = await self._client.post(
-            "/api/login",
-            json={"email": email, "password": password},
-        )
+        """Authenticate, store the token, return it.
+
+        Raises RuntimeError with a user-facing message on bad input, auth
+        failure, rate limiting, or network errors — never a raw httpx or
+        pydantic traceback.
+        """
+        email = (email or "").strip()
+        if not email:
+            raise RuntimeError("Email is required.")
+        if not password:
+            raise RuntimeError("Password is required.")
+        try:
+            resp = await self._client.post(
+                "/api/login",
+                json={"email": email, "password": password},
+            )
+        except httpx.TimeoutException as e:
+            raise RuntimeError(f"Login request timed out: {e}") from e
+        except httpx.HTTPError as e:
+            raise RuntimeError(f"Login failed — network error: {e}") from e
         if resp.status_code == 401:
-            err = LoginError.model_validate(resp.json())
-            raise RuntimeError(err.message)
+            raise RuntimeError(
+                _error_message(resp, default="Usuario o contraseña incorrectos")
+            )
         if resp.status_code == 422:
-            msg = resp.json().get("message", "Validation failed")
-            raise RuntimeError(msg)
-        resp.raise_for_status()
+            raise RuntimeError(
+                _error_message(
+                    resp,
+                    default="Por favor completa todos los datos del formulario.",
+                )
+            )
+        if resp.status_code == 429:
+            raise RuntimeError(
+                "Rate limited (HTTP 429). Wait a moment and try again."
+            )
+        if resp.status_code >= 400:
+            raise RuntimeError(
+                f"Login failed (HTTP {resp.status_code}): "
+                f"{_error_message(resp)}"
+            )
         token = AuthToken.model_validate(resp.json())
         self._token = token
         save_token(token)
@@ -190,37 +251,6 @@ class IdrdClient(IdrdClientPort):
         if sr.data:
             return Schedule.model_validate(sr.data)
         return None
-    async def discover_hidden(
-        self, max_probe: int = 5, delay: float = 0.05
-    ) -> tuple[list[int], list[int]]:
-        """Discover activities beyond the public search list.
-
-        Per your pointer: the real endpoint is the SINGULAR
-        `GET /api/citizen-portal/public-schedules/{id}`. Schedule 11410 is the
-        portal's last real activity (returns 200 + data); 11411 is the first 404.
-        We probe forward from that boundary — a 200 means the schedule exists,
-        a 404 means it does not.
-        """
-        import asyncio
-
-        found: list[int] = []
-        probed: list[int] = []
-        start = 11410  # last known real activity id (per your pointer)
-        for pid in range(start, start + max_probe):
-            url = f"/api/citizen-portal/public-schedules/{pid}"
-            try:
-                resp = await self._get(url)
-            except Exception:
-                probed.append(pid)
-                break
-            probed.append(pid)
-            if resp.status_code == 404:
-                # boundary of real ids — stop probing
-                break
-            if resp.status_code == 200:
-                found.append(pid)
-            await asyncio.sleep(delay)
-        return found, probed
 
     async def list_programs(self) -> list[Program]:
         resp = await self._get("/api/citizen-portal/programs")

@@ -6,6 +6,8 @@ All async calls wrapped with asyncio.run() since Typer uses sync handlers.
 from __future__ import annotations
 
 import asyncio
+import os
+import sys
 from typing import Any, Optional
 
 import typer
@@ -38,6 +40,35 @@ console = Console()
 def _run(coro) -> Any:
     """Run an async coroutine synchronously (one-shot CLI call)."""
     return asyncio.run(coro)
+
+
+def resolve_password(explicit: Optional[str]) -> str:
+    """Resolve the login password: --password flag > $IDRD_PASSWORD > hidden prompt.
+
+    On Windows, getpass reads from the console and ignores stdin redirection, so
+    prompting when stdin is not a TTY would hang scripts/CI forever — fail fast
+    with a clear message instead. Kept as a module-level helper so it is
+    unit-testable without driving a TTY.
+    """
+    if explicit:
+        return explicit
+    env_password = os.environ.get("IDRD_PASSWORD")
+    if env_password:
+        return env_password
+    if not sys.stdin.isatty():
+        raise RuntimeError(
+            "No password provided. Pass --password, set $IDRD_PASSWORD, "
+            "or run in an interactive terminal."
+        )
+    import getpass
+
+    try:
+        return getpass.getpass("Password: ")
+    except (EOFError, OSError):
+        raise RuntimeError(
+            "No password provided. Pass --password, set $IDRD_PASSWORD, "
+            "or run in an interactive terminal."
+        ) from None
 
 
 def _get_service() -> IdrdService:
@@ -81,12 +112,24 @@ def _schedule_table(schedules, title: str = "Activities") -> Table:
 @app.command()
 def login(
     email: str = typer.Option(..., "--email", "-e", help="Email address"),
-    password: str = typer.Option(..., "--password", "-p", help="Password", hide_input=True),
+    password: Optional[str] = typer.Option(
+        None,
+        "--password",
+        "-p",
+        help="Password (omit to use $IDRD_PASSWORD or be prompted)",
+        hide_input=True,
+    ),
 ) -> None:
     """Authenticate and store the session token."""
     service = _get_service()
+    if password:
+        console.print(
+            "[dim]Tip: pass --password via $IDRD_PASSWORD or the interactive prompt "
+            "to keep it out of shell history / process listings.[/]"
+        )
     try:
-        token = _run(service.login(email=email, password=password))
+        resolved = resolve_password(password)
+        token = _run(service.login(email=email, password=resolved))
         console.print(f"[green]✓[/] Login successful. Token stored (type: {token.token_type}).")
     except RuntimeError as e:
         console.print(f"[red]✗[/] Login failed: {e}")
