@@ -158,11 +158,6 @@ def login(
 ) -> None:
     """Authenticate and store the session token."""
     service = _get_service()
-    if password:
-        console.print(
-            "[dim]Tip: pass --password via $IDRD_PASSWORD or the interactive prompt "
-            "to keep it out of shell history / process listings.[/]"
-        )
     try:
         resolved = resolve_password(password)
         token = _run(service.login(email=email, password=resolved))
