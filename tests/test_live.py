@@ -101,3 +101,14 @@ async def test_list_stages_live(anon_client: IdrdClient) -> None:
     assert s.name is not None
     assert s.park_name is not None
     assert s.park_code is not None
+
+
+@pytest.mark.network
+@pytest.mark.asyncio
+async def test_list_profiles_live_401() -> None:
+    """Live profiles list with an invalid token must be rejected by the API."""
+    from idrd.models import AuthToken
+
+    bogus = IdrdClient(token=AuthToken(access_token="invalid-token-for-test", token_type="Bearer"))
+    with pytest.raises(RuntimeError, match="Unauthorized"):
+        await bogus.list_profiles()

@@ -27,6 +27,7 @@ Usage: idrd [OPTIONS] COMMAND [ARGS]...
    programs        Program commands (list)
    categories      Category commands (list)
    stages          Stage commands (list)
+   profiles        Beneficiary profile commands (list)
 ```
 
 ### Read commands (no auth required)
@@ -66,7 +67,12 @@ IDRD_PASSWORD=yourpass uv run idrd login --email your@email.com
 # View your user info
 uv run idrd whoami
 
-# Enroll in a free activity (--profile-id from /api/profiles)
+# List your beneficiary profiles (the id is what enroll needs)
+uv run idrd profiles list
+
+# Enroll in a free activity. If you have only one profile it is
+# auto-selected; otherwise pass --profile-id (from `idrd profiles list`)
+uv run idrd enroll 11409
 uv run idrd enroll 11409 --profile-id 1
 
 # View your bookings
@@ -202,6 +208,14 @@ tests/
 ├── e2e_stdio_check.py — manual E2E check: real stdio client + live API
 └── test_live.py — live tests (require --run-network)
 ```
+
+### Enroll flow
+
+The enroll flow is wired end-to-end: `idrd login` → `idrd profiles list`
+(shows beneficiary profile ids) → `idrd enroll <schedule_id>` (auto-selects
+the only profile, or `--profile-id <id>` when there are several) →
+`idrd my-bookings` (confirms the subscription). Profiles come from
+`GET /api/profiles/list`; enrolling sends `PUT /api/profiles/{id}/schedules/{sid}`.
 
 ### Design decisions
 

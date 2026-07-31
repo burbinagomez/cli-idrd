@@ -11,6 +11,8 @@ from idrd.models import (
     AuthToken,
     Booking,
     Category,
+    LoginError,
+    Profile,
     Program,
     Schedule,
     SingleResponse,
@@ -272,6 +274,25 @@ class IdrdClient(IdrdClientPort):
         body = resp.json()
         data_list = body if isinstance(body, list) else body.get("data", [])
         ta = TypeAdapter(list[Stage])
+        return ta.validate_python(data_list)
+
+    async def list_profiles(self) -> list[Profile]:
+        """List beneficiary profiles for the current user (auth).
+
+        The SPA calls GET /api/profiles/list and reads the `data` key; the
+        response may also be a bare list. Envelope handled for both.
+        """
+        await self._check_auth()
+        resp = await self._get("/api/profiles/list")
+        if resp.status_code == 401:
+            raise RuntimeError(
+                "Unauthorized (401) — GET /api/profiles/list. "
+                "Your token may be invalid or expired. Re-run 'idrd login'."
+            )
+        resp.raise_for_status()
+        body = resp.json()
+        data_list = body if isinstance(body, list) else body.get("data", [])
+        ta = TypeAdapter(list[Profile])
         return ta.validate_python(data_list)
 
     async def enroll(self, profile_id: int, schedule_id: int) -> dict:

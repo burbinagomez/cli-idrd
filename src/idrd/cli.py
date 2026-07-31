@@ -35,6 +35,8 @@ stages_app = typer.Typer(help="Stage commands.")
 app.add_typer(stages_app, name="stages")
 cache_app = typer.Typer(help="Local response cache commands (search results).")
 app.add_typer(cache_app, name="cache")
+profiles_app = typer.Typer(help="Beneficiary profile commands (auth).")
+app.add_typer(profiles_app, name="profiles")
 
 console = Console()
 
@@ -394,18 +396,58 @@ def stages_list(
 @app.command()
 def enroll(
     schedule_id: int = typer.Argument(..., help="Schedule/activity ID to enroll in"),
-    profile_id: int = typer.Option(..., "--profile-id", "-p", help="Beneficiary profile ID"),
+    profile_id: Optional[int] = typer.Option(None, "--profile-id", "-p", help="Beneficiary profile ID (auto-selected if you have only one)"),
 ) -> None:
     """Enroll a profile in an activity (requires auth)."""
     service = _get_service()
     try:
-        result = _run(service.enroll(profile_id=profile_id, schedule_id=schedule_id))
-        console.print("[green]✓[/] Enrollment request sent.")
+        pid, result = _run(service.enroll_for_user(schedule_id=schedule_id, profile_id=profile_id))
+        console.print(f"[green]✓[/] Enrollment request sent for profile {pid}.")
         if result:
             _print_json(result)
     except RuntimeError as e:
         console.print(f"[red]✗[/] {e}")
         raise typer.Exit(code=1)
+
+
+# ── Profiles ──────────────────────────────────────────────────────────────
+
+@profiles_app.command(name="list")
+def profiles_list(
+    json: bool = typer.Option(False, "--json", help="Output as JSON"),
+) -> None:
+    """List your beneficiary profiles (requires auth)."""
+    service = _get_service()
+    try:
+        profiles = _run(service.list_profiles())
+    except RuntimeError as e:
+        console.print(f"[red]✗[/] {e}")
+        raise typer.Exit(code=1)
+    if json:
+        _print_json([p.model_dump(mode="json") for p in profiles])
+    else:
+        if not profiles:
+            console.print("[yellow]No profiles found.[/]")
+            return
+        table = Table(title="Profiles")
+        table.add_column("ID", style="cyan")
+        table.add_column("Name")
+        table.add_column("Document")
+        table.add_column("Doc Type")
+        table.add_column("Birthdate")
+        table.add_column("Age", justify="right")
+        table.add_column("Verified")
+        for p in profiles:
+            table.add_row(
+                str(p.id),
+                p.full_name or "",
+                p.document or "",
+                p.document_type or (str(p.document_type_id) if p.document_type_id else ""),
+                p.birthdate or "",
+                str(p.age or ""),
+                "yes" if p.verified else ("no" if p.verified is not None else ""),
+            )
+        console.print(table)
 
 
 # ── My Bookings ──────────────────────────────────────────────────────────
