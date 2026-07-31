@@ -150,14 +150,38 @@ class User(BaseModel):
 
 
 class Profile(BaseModel):
-    """Beneficiary profile."""
+    """Beneficiary profile (GET /api/profiles/list).
+
+    Shape verified from the SPA bundle (VPreRegister form): the API returns
+    first_name/middle_name/first_last_name/second_last_name, document,
+    document_type_id, birthdate, sex_id, verified, age, disability, relationship.
+    """
+
     id: int
-    name: Optional[str] = None
+    first_name: Optional[str] = None
+    middle_name: Optional[str] = None
+    first_last_name: Optional[str] = None
+    second_last_name: Optional[str] = None
     document: Optional[str] = None
+    document_type_id: Optional[int] = None
     document_type: Optional[str] = None
+    birthdate: Optional[str] = None
+    sex_id: Optional[int] = None
+    verified: Optional[bool] = None
+    age: Optional[int] = None
+    disability: Optional[str] = None
     relationship: Optional[str] = None
-    birth_date: Optional[str] = None
-    gender: Optional[str] = None
+
+    @property
+    def full_name(self) -> str:
+        """Concatenated full name, e.g. 'JUAN CARLOS PEREZ GOMEZ'."""
+        parts = [
+            self.first_name or "",
+            self.middle_name or "",
+            self.first_last_name or "",
+            self.second_last_name or "",
+        ]
+        return " ".join(p for p in parts if p).strip()
 
 
 # ── Booking ──────────────────────────────────────────────────────────────

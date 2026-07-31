@@ -12,6 +12,7 @@ from idrd.models import (
     Booking,
     Category,
     LoginError,
+    Profile,
     Program,
     Schedule,
     SingleResponse,
@@ -190,37 +191,6 @@ class IdrdClient(IdrdClientPort):
         if sr.data:
             return Schedule.model_validate(sr.data)
         return None
-    async def discover_hidden(
-        self, max_probe: int = 5, delay: float = 0.05
-    ) -> tuple[list[int], list[int]]:
-        """Discover activities beyond the public search list.
-
-        Per your pointer: the real endpoint is the SINGULAR
-        `GET /api/citizen-portal/public-schedules/{id}`. Schedule 11410 is the
-        portal's last real activity (returns 200 + data); 11411 is the first 404.
-        We probe forward from that boundary — a 200 means the schedule exists,
-        a 404 means it does not.
-        """
-        import asyncio
-
-        found: list[int] = []
-        probed: list[int] = []
-        start = 11410  # last known real activity id (per your pointer)
-        for pid in range(start, start + max_probe):
-            url = f"/api/citizen-portal/public-schedules/{pid}"
-            try:
-                resp = await self._get(url)
-            except Exception:
-                probed.append(pid)
-                break
-            probed.append(pid)
-            if resp.status_code == 404:
-                # boundary of real ids — stop probing
-                break
-            if resp.status_code == 200:
-                found.append(pid)
-            await asyncio.sleep(delay)
-        return found, probed
 
     async def list_programs(self) -> list[Program]:
         resp = await self._get("/api/citizen-portal/programs")
@@ -244,6 +214,25 @@ class IdrdClient(IdrdClientPort):
         body = resp.json()
         data_list = body if isinstance(body, list) else body.get("data", [])
         ta = TypeAdapter(list[Stage])
+        return ta.validate_python(data_list)
+
+    async def list_profiles(self) -> list[Profile]:
+        """List beneficiary profiles for the current user (auth).
+
+        The SPA calls GET /api/profiles/list and reads the `data` key; the
+        response may also be a bare list. Envelope handled for both.
+        """
+        await self._check_auth()
+        resp = await self._get("/api/profiles/list")
+        if resp.status_code == 401:
+            raise RuntimeError(
+                "Unauthorized (401) — GET /api/profiles/list. "
+                "Your token may be invalid or expired. Re-run 'idrd login'."
+            )
+        resp.raise_for_status()
+        body = resp.json()
+        data_list = body if isinstance(body, list) else body.get("data", [])
+        ta = TypeAdapter(list[Profile])
         return ta.validate_python(data_list)
 
     async def enroll(self, profile_id: int, schedule_id: int) -> dict:

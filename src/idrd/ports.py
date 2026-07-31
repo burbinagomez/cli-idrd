@@ -8,6 +8,7 @@ from idrd.models import (
     AuthToken,
     Booking,
     Category,
+    Profile,
     Program,
     Schedule,
     Stage,
@@ -47,6 +48,10 @@ class IdrdClientPort(Protocol):
 
     async def list_stages(self) -> list[Stage]:
         """List all stages/scenarios."""
+        ...
+
+    async def list_profiles(self) -> list[Profile]:
+        """List beneficiary profiles for the current user (auth)."""
         ...
 
     async def enroll(self, profile_id: int, schedule_id: int) -> dict:

@@ -13,7 +13,7 @@ import pytest
 from pydantic import TypeAdapter
 
 from idrd.client import IdrdClient
-from idrd.models import AuthToken, Booking, Category, Program, Schedule, Stage, User
+from idrd.models import AuthToken, Booking, Category, Profile, Program, Schedule, Stage, User
 from idrd.ports import IdrdClientPort
 from idrd.session import load_token, save_token
 
@@ -241,7 +241,137 @@ async def test_enroll_no_auth(anon_client: IdrdClient) -> None:
         await anon_client.enroll(profile_id=42, schedule_id=11409)
 
 
-# ── Test: my_bookings request shape (auth required) ───────────────────────
+# ── Test: list_profiles request shape (auth required) ─────────────────────
+
+@pytest.mark.asyncio
+async def test_list_profiles_request(client: IdrdClient) -> None:
+    """Verify list_profiles sends GET /api/profiles/list with auth and parses envelope."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert "/api/profiles/list" in str(request.url)
+        assert "Authorization" in request.headers
+        return httpx.Response(200, json={
+            "data": [
+                {
+                    "id": 7,
+                    "first_name": "JUAN",
+                    "middle_name": "CARLOS",
+                    "first_last_name": "PEREZ",
+                    "second_last_name": "GOMEZ",
+                    "document": "1010101010",
+                    "document_type_id": 1,
+                    "birthdate": "1990-05-01",
+                    "verified": True,
+                    "age": 36,
+                },
+                {
+                    "id": 8,
+                    "first_name": "MARIA",
+                    "first_last_name": "LOPEZ",
+                    "document": "2020202020",
+                    "verified": False,
+                },
+            ],
+            "code": 200,
+        })
+
+    client._client = _mock_transport(handler)
+    profiles = await client.list_profiles()
+    assert len(profiles) == 2
+    assert profiles[0].id == 7
+    assert profiles[0].full_name == "JUAN CARLOS PEREZ GOMEZ"
+    assert profiles[0].age == 36
+    assert profiles[1].verified is False
+    assert profiles[1].full_name == "MARIA LOPEZ"
+
+
+@pytest.mark.asyncio
+async def test_list_profiles_bare_list(client: IdrdClient) -> None:
+    """list_profiles tolerates a bare array response (no envelope)."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[{"id": 1, "first_name": "ANA"}])
+
+    client._client = _mock_transport(handler)
+    profiles = await client.list_profiles()
+    assert len(profiles) == 1
+    assert profiles[0].id == 1
+    assert profiles[0].full_name == "ANA"
+
+
+@pytest.mark.asyncio
+async def test_list_profiles_no_auth(anon_client: IdrdClient) -> None:
+    """Verify list_profiles raises RuntimeError when not authenticated."""
+    with pytest.raises(RuntimeError, match="Not authenticated"):
+        await anon_client.list_profiles()
+
+
+# ── Test: service enroll_for_user (profile auto-resolution) ───────────────
+
+class _FakeClient:
+    """Minimal IdrdClientPort double for service-level tests."""
+
+    def __init__(self, profiles=None, enroll_result=None):
+        self._profiles = profiles if profiles is not None else []
+        self._enroll_result = enroll_result if enroll_result is not None else {}
+        self.enrolled: list[tuple[int, int]] = []
+
+    async def list_profiles(self):
+        return self._profiles
+
+    async def enroll(self, profile_id: int, schedule_id: int) -> dict:
+        self.enrolled.append((profile_id, schedule_id))
+        return self._enroll_result
+
+
+def _profile(pid: int, name: str) -> Profile:
+    return Profile(id=pid, first_name=name)
+
+
+@pytest.mark.asyncio
+async def test_enroll_for_user_explicit_profile() -> None:
+    """Explicit --profile-id bypasses profile lookup."""
+    fake = _FakeClient(profiles=[_profile(1, "ANA"), _profile(2, "BETO")])
+    from idrd.service import IdrdService
+    svc = IdrdService(fake)
+    pid, result = await svc.enroll_for_user(schedule_id=11409, profile_id=2)
+    assert pid == 2
+    assert fake.enrolled == [(2, 11409)]
+
+
+@pytest.mark.asyncio
+async def test_enroll_for_user_single_profile_auto() -> None:
+    """Single profile is auto-selected when --profile-id omitted."""
+    fake = _FakeClient(profiles=[_profile(5, "ANA")])
+    from idrd.service import IdrdService
+    svc = IdrdService(fake)
+    pid, result = await svc.enroll_for_user(schedule_id=11409)
+    assert pid == 5
+    assert fake.enrolled == [(5, 11409)]
+
+
+@pytest.mark.asyncio
+async def test_enroll_for_user_multiple_profiles_raises() -> None:
+    """Multiple profiles require --profile-id; error lists available ids."""
+    fake = _FakeClient(profiles=[_profile(1, "ANA"), _profile(2, "BETO")])
+    from idrd.service import IdrdService
+    svc = IdrdService(fake)
+    with pytest.raises(RuntimeError, match="Multiple profiles"):
+        await svc.enroll_for_user(schedule_id=11409)
+    assert fake.enrolled == []
+
+
+@pytest.mark.asyncio
+async def test_enroll_for_user_no_profiles_raises() -> None:
+    """No profiles produces a clear error."""
+    fake = _FakeClient(profiles=[])
+    from idrd.service import IdrdService
+    svc = IdrdService(fake)
+    with pytest.raises(RuntimeError, match="No beneficiary profiles"):
+        await svc.enroll_for_user(schedule_id=11409)
+    assert fake.enrolled == []
+
+
+
 
 @pytest.mark.asyncio
 async def test_my_bookings_request(client: IdrdClient) -> None:
