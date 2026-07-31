@@ -94,7 +94,7 @@ src/idrd/
 
 tests/
 ├── conftest.py  — pytest config (--run-network flag)
-├── test_unit.py — 17 unit tests (mocked transport, no network)
+├── test_unit.py — 19 unit tests (mocked transport, no network)
 └── test_live.py — 6 live tests (require --run-network)
 ```
 

@@ -37,6 +37,15 @@ class IdrdClientPort(Protocol):
         """Get a single schedule by id."""
         ...
 
+    async def discover_hidden(
+        self, max_probe: int = 5, delay: float = 0.05
+    ) -> tuple[list[int], list[int]]:
+        """Probe singular schedule ids past the public list.
+
+        Returns (found_ids, probed_ids).
+        """
+        ...
+
     async def list_programs(self) -> list[Program]:
         """List all programs."""
         ...
@@ -59,4 +68,8 @@ class IdrdClientPort(Protocol):
 
     async def whoami(self) -> Optional[User]:
         """Get current user info."""
+        ...
+
+    async def close(self) -> None:
+        """Release the underlying HTTP connection pool."""
         ...

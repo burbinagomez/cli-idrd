@@ -45,6 +45,23 @@ def _get_service() -> IdrdService:
     return IdrdService(IdrdClient())
 
 
+async def _hidden_search(service: IdrdService) -> tuple[list[int], list[int], Optional[Any]]:
+    """Discover hidden activities and fetch the first found one.
+
+    Runs inside a single event loop so the shared httpx client is never
+    reused across `asyncio.run()` boundaries (which would trip over closed
+    event-loop connections).
+    """
+    found, probed = await service.discover_hidden()
+    sched = None
+    if found:
+        try:
+            sched = await service.get_schedule(found[0])
+        except Exception:
+            sched = None
+    return found, probed, sched
+
+
 def _print_json(data) -> None:
     """Print data as JSON."""
     import json
@@ -146,11 +163,10 @@ def search(
     if program_id:
         pids = [int(x.strip()) for x in program_id.split(",") if x.strip()]
     if hidden:
-        # Probe program_id[] for ids beyond the known public list (~45), finding
-        # activities the portal hides. Uses GET /api/.../public-schedules?program_id[]=<id>
-        # and stops at first 404 (last real id = highest reachable program).
+        # Probe singular public-schedules/{id} past the known public list,
+        # stopping at the first 404 (last real id = highest reachable id).
         try:
-            found, probed = _run(service.discover_hidden())
+            found, probed, sched = _run(_hidden_search(service))
         except Exception as e:
             console.print(f"[red]✗[/] Hidden discovery failed: {e}")
             raise typer.Exit(code=1)
@@ -160,19 +176,14 @@ def search(
         console.print(f"[green]✓[/] Found {len(found)} hidden activit{'y' if len(found)==1 else 'ies'} (probed {len(probed)} ids):")
         for pid in found:
             console.print(f"  • program_id {pid}")
-        # Resolve details for the first found one so the user can inspect it
-        try:
-            sched = _run(service.get_schedule(found[0]))
-        except Exception as e:
-            console.print(f"[yellow]Could not fetch detail for {found[0]}: {e}[/]")
-            sched = None
         if sched is not None:
-            s = sched
             if json:
-                _print_json(s.model_dump(mode="json"))
+                _print_json(sched.model_dump(mode="json"))
             else:
-                table = _schedule_table([s], title=f"Hidden Activity (program_id {found[0]})")
+                table = _schedule_table([sched], title=f"Hidden Activity (program_id {found[0]})")
                 console.print(table)
+        else:
+            console.print(f"[yellow]Could not fetch detail for {found[0]}.[/]")
         return
     try:
         schedules, links, meta = _run(service.search_schedules(

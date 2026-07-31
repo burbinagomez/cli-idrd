@@ -65,3 +65,7 @@ class IdrdService:
 
     async def my_bookings(self) -> list[Booking]:
         return await self._client.my_bookings()
+
+    async def close(self) -> None:
+        """Release the underlying HTTP client resources."""
+        await self._client.close()

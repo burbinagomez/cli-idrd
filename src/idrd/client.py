@@ -23,9 +23,22 @@ from idrd.session import load_token, save_token
 
 _UNSET = object()
 
+#: Headers every request sends; shared by all httpx clients the class owns.
+_DEFAULT_HEADERS = {
+    "Accept": "application/json",
+    "Content-Type": "application/json",
+    "User-Agent": "idrd-cli/0.1",
+}
+
 
 class IdrdClient(IdrdClientPort):
-    """Concrete async client backed by httpx.AsyncClient."""
+    """Concrete async client backed by httpx.AsyncClient.
+
+    An instance is bound to the event loop in which it first performs
+    requests — do not reuse one across ``asyncio.run()`` boundaries.
+    The CLI creates a fresh instance per command and runs each command's
+    awaits in a single loop.
+    """
 
     BASE_URL = "https://portalciudadano-back.idrd.gov.co"
 
@@ -43,11 +56,7 @@ class IdrdClient(IdrdClientPort):
         self._token_prefix = token_prefix
         self._client = httpx.AsyncClient(
             base_url=self.BASE_URL,
-            headers={
-                "Accept": "application/json",
-                "Content-Type": "application/json",
-                "User-Agent": "idrd-cli/0.1",
-            },
+            headers=dict(_DEFAULT_HEADERS),
             timeout=30.0,
         )
 
@@ -59,25 +68,31 @@ class IdrdClient(IdrdClientPort):
             return {"Authorization": f"{self._token_prefix} {self._token.access_token}"}
         return {}
 
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        auth: bool = True,
+        **kwargs,
+    ) -> httpx.Response:
+        """Send a request, merging the auth header into any caller headers."""
+        headers = dict(kwargs.pop("headers", {}))
+        if auth:
+            headers.update(self._auth_header())
+        return await self._client.request(method, path, headers=headers, **kwargs)
+
     async def _get(self, path: str, **kwargs) -> httpx.Response:
-        headers = kwargs.pop("headers", {})
-        headers.update(self._auth_header())
-        return await self._client.get(path, headers=headers, **kwargs)
+        return await self._request("GET", path, **kwargs)
 
     async def _post(self, path: str, **kwargs) -> httpx.Response:
-        headers = kwargs.pop("headers", {})
-        headers.update(self._auth_header())
-        return await self._client.post(path, headers=headers, **kwargs)
+        return await self._request("POST", path, **kwargs)
 
     async def _put(self, path: str, **kwargs) -> httpx.Response:
-        headers = kwargs.pop("headers", {})
-        headers.update(self._auth_header())
-        return await self._client.put(path, headers=headers, **kwargs)
+        return await self._request("PUT", path, **kwargs)
 
     async def _delete(self, path: str, **kwargs) -> httpx.Response:
-        headers = kwargs.pop("headers", {})
-        headers.update(self._auth_header())
-        return await self._client.delete(path, headers=headers, **kwargs)
+        return await self._request("DELETE", path, **kwargs)
 
     async def _check_auth(self) -> None:
         """Raise if no token is loaded."""
@@ -86,17 +101,14 @@ class IdrdClient(IdrdClientPort):
                 "Not authenticated. Run 'idrd login' first or provide a token."
             )
 
-    @staticmethod
-    def _extract_schedule(data: dict[str, Any]) -> Schedule:
-        return Schedule.model_validate(data)
-
     # ── public API ────────────────────────────────────────────────────────
 
     async def login(self, email: str, password: str) -> AuthToken:
         """Authenticate, store the token, return it."""
-        resp = await self._client.post(
+        resp = await self._post(
             "/api/login",
             json={"email": email, "password": password},
+            auth=False,
         )
         if resp.status_code == 401:
             err = LoginError.model_validate(resp.json())
@@ -139,29 +151,29 @@ class IdrdClient(IdrdClientPort):
     async def discover_hidden(
         self, max_probe: int = 5, delay: float = 0.05
     ) -> tuple[list[int], list[int]]:
-        """Discover activities beyond the public search list.
+        """Probe singular schedule ids past the public list to find hidden ones.
 
-        Per your pointer: the real endpoint is the SINGULAR
-        `GET /api/citizen-portal/public-schedules/{id}`. Schedule 11410 is the
-        portal's last real activity (returns 200 + data); 11411 is the first 404.
-        We probe forward from that boundary — a 200 means the schedule exists,
-        a 404 means it does not.
+        `GET /api/citizen-portal/public-schedules/{id}` returns 200 for real
+        activities and 404 past the last one, so we probe forward from the
+        last known real id (11410) and stop at the first 404.
+        Returns (found_ids, probed_ids).
         """
         import asyncio
 
         found: list[int] = []
         probed: list[int] = []
-        start = 11410  # last known real activity id (per your pointer)
+        start = 11410  # last known real activity id
         for pid in range(start, start + max_probe):
             url = f"/api/citizen-portal/public-schedules/{pid}"
             try:
                 resp = await self._get(url)
-            except Exception:
+            except httpx.HTTPError:
+                # Transport error — boundary unknown past here, stop probing.
                 probed.append(pid)
                 break
             probed.append(pid)
             if resp.status_code == 404:
-                # boundary of real ids — stop probing
+                # Boundary of real ids — stop probing.
                 break
             if resp.status_code == 200:
                 found.append(pid)
@@ -169,58 +181,14 @@ class IdrdClient(IdrdClientPort):
         return found, probed
 
     async def get_schedule(self, schedule_id: int) -> Optional[Schedule]:
-        # Use a fresh httpx client so this works even after another coroutine's
-        # event loop has closed (e.g. when called after discover_hidden()).
-        async with httpx.AsyncClient(
-            base_url=self.BASE_URL,
-            headers={
-                "Accept": "application/json",
-                "Content-Type": "application/json",
-                "User-Agent": "idrd-cli/0.1",
-            },
-            timeout=30.0,
-        ) as client:
-            resp = await client.get(
-                f"/api/citizen-portal/public-schedules/{schedule_id}",
-                headers=self._auth_header(),
-            )
-            resp.raise_for_status()
-            body = resp.json()
+        """Get a single schedule by id (uses the shared client)."""
+        resp = await self._get(f"/api/citizen-portal/public-schedules/{schedule_id}")
+        resp.raise_for_status()
+        body = resp.json()
         sr = SingleResponse.model_validate(body)
         if sr.data:
             return Schedule.model_validate(sr.data)
         return None
-    async def discover_hidden(
-        self, max_probe: int = 5, delay: float = 0.05
-    ) -> tuple[list[int], list[int]]:
-        """Discover activities beyond the public search list.
-
-        Per your pointer: the real endpoint is the SINGULAR
-        `GET /api/citizen-portal/public-schedules/{id}`. Schedule 11410 is the
-        portal's last real activity (returns 200 + data); 11411 is the first 404.
-        We probe forward from that boundary — a 200 means the schedule exists,
-        a 404 means it does not.
-        """
-        import asyncio
-
-        found: list[int] = []
-        probed: list[int] = []
-        start = 11410  # last known real activity id (per your pointer)
-        for pid in range(start, start + max_probe):
-            url = f"/api/citizen-portal/public-schedules/{pid}"
-            try:
-                resp = await self._get(url)
-            except Exception:
-                probed.append(pid)
-                break
-            probed.append(pid)
-            if resp.status_code == 404:
-                # boundary of real ids — stop probing
-                break
-            if resp.status_code == 200:
-                found.append(pid)
-            await asyncio.sleep(delay)
-        return found, probed
 
     async def list_programs(self) -> list[Program]:
         resp = await self._get("/api/citizen-portal/programs")

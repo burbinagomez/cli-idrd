@@ -290,6 +290,45 @@ async def test_whoami_no_auth(anon_client: IdrdClient) -> None:
         await anon_client.whoami()
 
 
+# ── Test: discover_hidden ─────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_discover_hidden_probes_and_stops_at_404() -> None:
+    """Verify discover_hidden probes singular ids from 11410 and stops at 404."""
+    seen: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        # Request must hit the singular endpoint on the shared base URL.
+        assert request.method == "GET"
+        assert "public-schedules/" in str(request.url)
+        pid = int(str(request.url).rsplit("/", 1)[1])
+        seen.append(pid)
+        if pid >= 11412:
+            return httpx.Response(404, json={"message": "Not found"})
+        return httpx.Response(200, json={"data": {"id": pid, "activity_name": "X"}})
+
+    client = IdrdClient(token=None)
+    client._client = _mock_transport(handler)
+    found, probed = await client.discover_hidden(max_probe=10, delay=0)
+    assert found == [11410, 11411]
+    assert probed == [11410, 11411, 11412]
+    assert seen == [11410, 11411, 11412]
+
+
+@pytest.mark.asyncio
+async def test_discover_hidden_no_found() -> None:
+    """Verify discover_hidden returns empty lists when everything 404s."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"message": "Not found"})
+
+    client = IdrdClient(token=None)
+    client._client = _mock_transport(handler)
+    found, probed = await client.discover_hidden(max_probe=3, delay=0)
+    assert found == []
+    assert probed == [11410]
+
+
 # ── Test: IdrdClientPort protocol is satisfied ────────────────────────────
 
 def test_client_satisfies_port() -> None:
