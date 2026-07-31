@@ -9,6 +9,7 @@ description = "CLI for IDRD Portal Ciudadano API (Bogotá recreation institute)"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "fastmcp>=2.4.1",
     "httpx>=0.28.1",
     "pydantic>=2.13.4",
     "rich>=15.0.0",
@@ -17,6 +18,7 @@ dependencies = [
 
 [project.scripts]
 idrd = "idrd.cli:app"
+idrd-mcp = "idrd.mcp_server:main"
 
 [dependency-groups]
 dev = [
